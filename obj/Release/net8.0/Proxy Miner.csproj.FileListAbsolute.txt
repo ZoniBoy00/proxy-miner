@@ -1,0 +1,24 @@
+C:\Users\jonis\source\repos\Proxy Miner\bin\Release\net8.0\Proxy Miner.exe
+C:\Users\jonis\source\repos\Proxy Miner\bin\Release\net8.0\icon.ico
+C:\Users\jonis\source\repos\Proxy Miner\bin\Release\net8.0\Proxy Miner.deps.json
+C:\Users\jonis\source\repos\Proxy Miner\bin\Release\net8.0\Proxy Miner.runtimeconfig.json
+C:\Users\jonis\source\repos\Proxy Miner\bin\Release\net8.0\Proxy Miner.dll
+C:\Users\jonis\source\repos\Proxy Miner\bin\Release\net8.0\Proxy Miner.pdb
+C:\Users\jonis\source\repos\Proxy Miner\bin\Release\net8.0\DotNetEnv.dll
+C:\Users\jonis\source\repos\Proxy Miner\bin\Release\net8.0\HtmlAgilityPack.dll
+C:\Users\jonis\source\repos\Proxy Miner\bin\Release\net8.0\Microsoft.Extensions.Configuration.dll
+C:\Users\jonis\source\repos\Proxy Miner\bin\Release\net8.0\Microsoft.Extensions.Configuration.Abstractions.dll
+C:\Users\jonis\source\repos\Proxy Miner\bin\Release\net8.0\Microsoft.Extensions.Primitives.dll
+C:\Users\jonis\source\repos\Proxy Miner\bin\Release\net8.0\Octokit.dll
+C:\Users\jonis\source\repos\Proxy Miner\bin\Release\net8.0\Sprache.dll
+C:\Users\jonis\source\repos\Proxy Miner\obj\Release\net8.0\Proxy Miner.csproj.AssemblyReference.cache
+C:\Users\jonis\source\repos\Proxy Miner\obj\Release\net8.0\Proxy Miner.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\jonis\source\repos\Proxy Miner\obj\Release\net8.0\Proxy Miner.AssemblyInfoInputs.cache
+C:\Users\jonis\source\repos\Proxy Miner\obj\Release\net8.0\Proxy Miner.AssemblyInfo.cs
+C:\Users\jonis\source\repos\Proxy Miner\obj\Release\net8.0\Proxy Miner.csproj.CoreCompileInputs.cache
+C:\Users\jonis\source\repos\Proxy Miner\obj\Release\net8.0\Proxy Mi.AF56ECFE.Up2Date
+C:\Users\jonis\source\repos\Proxy Miner\obj\Release\net8.0\Proxy Miner.dll
+C:\Users\jonis\source\repos\Proxy Miner\obj\Release\net8.0\refint\Proxy Miner.dll
+C:\Users\jonis\source\repos\Proxy Miner\obj\Release\net8.0\Proxy Miner.pdb
+C:\Users\jonis\source\repos\Proxy Miner\obj\Release\net8.0\Proxy Miner.genruntimeconfig.cache
+C:\Users\jonis\source\repos\Proxy Miner\obj\Release\net8.0\ref\Proxy Miner.dll
