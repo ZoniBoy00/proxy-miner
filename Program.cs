@@ -1,4 +1,4 @@
-﻿#nullable enable
+#nullable enable
 
 using System;
 using System.Collections.Concurrent;
@@ -10,58 +10,87 @@ using System.Net.Http;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
-using System.Timers;
+using System.Text;
 using HtmlAgilityPack;
 using Octokit;
 using DotNetEnv;
+using System.Diagnostics;
 
 namespace ProxyCheckerConsoleApp
 {
     class Program
     {
+        // Thread-safe collections
         private static readonly ConcurrentBag<ProxyInfo> proxyList = new();
+        private static readonly ConcurrentDictionary<string, byte> uniqueProxies = new();
+        private static readonly SemaphoreSlim semaphore = new(500);
+
+        // GitHub configuration
         private static string? githubToken;
         private static string? githubRepoOwner;
         private static string? githubRepoName;
-        private static readonly ConcurrentDictionary<string, byte> uniqueProxies = new();
-        private static readonly SemaphoreSlim semaphore = new(100);
 
+        // User agents for rotation
+        private static readonly string[] userAgents = {
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:89.0) Gecko/20100101 Firefox/89.0",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.1 Safari/605.1.15",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Edge/91.0.864.59"
+        };
+
+        // HTTP client configuration
         private static readonly HttpClientHandler handler = new()
         {
-            AllowAutoRedirect = true,
+            AllowAutoRedirect = false,
             AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate,
             ServerCertificateCustomValidationCallback = (_, _, _, _) => true,
-            MaxConnectionsPerServer = 100
+            MaxConnectionsPerServer = 1000
         };
 
         private static readonly HttpClient httpClient = new(handler)
         {
-            Timeout = TimeSpan.FromMinutes(2)
+            Timeout = TimeSpan.FromSeconds(30)
         };
 
+        // Global network settings
         static Program()
         {
             ServicePointManager.DefaultConnectionLimit = 1000;
             ServicePointManager.ReusePort = true;
+            ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12 | SecurityProtocolType.Tls13;
+            ServicePointManager.CheckCertificateRevocationList = false;
         }
 
+        // Proxy model
         private class ProxyInfo
         {
-            public required string Ip { get; set; }
-            public required string Port { get; set; }
-            public required string Type { get; set; }
+            public string Ip { get; set; } = string.Empty;
+            public string Port { get; set; } = string.Empty;
+            public string Type { get; set; } = string.Empty;
             public bool IsWorking { get; set; }
             public int ResponseTime { get; set; }
+            public string Anonymity { get; set; } = "Unknown";
+            public DateTime LastChecked { get; set; }
+            public string Country { get; set; } = "Unknown";
+            public int SuccessCount { get; set; }
+            public int FailureCount { get; set; }
         }
 
-        private static readonly string[] proxySources = {
-            "https://www.sslproxies.org/",
-            "https://www.us-proxy.org/",
-            "https://free-proxy-list.net/",
-            "https://www.socks-proxy.net/",
-            "https://api.proxyscrape.com/v2/?request=getproxies&protocol=http",
-            "https://api.proxyscrape.com/v2/?request=getproxies&protocol=socks4",
-            "https://api.proxyscrape.com/v2/?request=getproxies&protocol=socks5",
+        // Proxy sources
+        private static readonly string[] proxySources = new string[]
+        {
+            "https://www.sslproxies.org",
+            "https://www.us-proxy.org",
+            "https://free-proxy-list.net",
+            "https://www.socks-proxy.net",
+            "https://www.proxynova.com/proxy-server-list",
+            "https://www.iplocation.net/proxy-list",
+            "https://openproxy.space/list/http",
+            "https://openproxy.space/list/socks4",
+            "https://openproxy.space/list/socks5",
+            "https://proxylist.geonode.com/api/proxy-list",
+            "https://free-proxy-list.com",
+            "https://api.proxyscrape.com",
             "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
             "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks4.txt",
             "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt",
@@ -79,12 +108,20 @@ namespace ProxyCheckerConsoleApp
             "https://raw.githubusercontent.com/rdavydov/proxy-list/main/proxies/http.txt",
             "https://raw.githubusercontent.com/rdavydov/proxy-list/main/proxies/socks4.txt",
             "https://raw.githubusercontent.com/rdavydov/proxy-list/main/proxies/socks5.txt",
-            "https://proxylist.geonode.com/api/proxy-list?limit=500&page=1&sort_by=lastChecked&sort_type=desc",
-            "https://www.proxynova.com/proxy-server-list/",
-            "https://www.iplocation.net/proxy-list"
+            "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/http.txt",
+            "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/socks4.txt",
+            "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/socks5.txt",
+            "https://raw.githubusercontent.com/mmpx12/proxy-list/master/http.txt",
+            "https://raw.githubusercontent.com/mmpx12/proxy-list/master/socks4.txt",
+            "https://raw.githubusercontent.com/mmpx12/proxy-list/master/socks5.txt",
+            "https://raw.githubusercontent.com/proxy4parsing/proxy-list/main/http.txt",
+            "https://raw.githubusercontent.com/roosterkid/openproxylist/main/SOCKS4_RAW.txt",
+            "https://raw.githubusercontent.com/roosterkid/openproxylist/main/SOCKS5_RAW.txt",
+            "https://www.proxynova.com/proxy-server-list/elite-proxies",
+            "https://www.proxynova.com/proxy-server-list/anonymous-proxies"
         };
 
-
+        // Main entry point
         static async Task Main()
         {
             try
@@ -100,7 +137,16 @@ namespace ProxyCheckerConsoleApp
                 }
 
                 await TestGitHubConnection();
-                await RunProxyCheck();
+
+                // Start continuous scanning process
+                while (true)
+                {
+                    await RunProxyCheck();
+
+                    // Wait for one hour before the next scan
+                    Console.WriteLine("\nWaiting for one hour before the next scan...");
+                    await Task.Delay(TimeSpan.FromHours(1));
+                }
             }
             catch (Exception ex)
             {
@@ -126,12 +172,18 @@ namespace ProxyCheckerConsoleApp
             }
         }
 
+        // Main proxy checking process
         private static async Task RunProxyCheck()
         {
-            while (true)
+            Console.WriteLine("\nStarting new proxy check cycle...");
+            var startTime = DateTime.Now;
+
+            try
             {
-                Console.WriteLine("Starting proxy check...");
                 await FetchProxiesParallel();
+                Console.WriteLine($"Found {proxyList.Count} unique proxies to check");
+
+                await CheckProxiesParallel();
 
                 var workingProxies = proxyList
                     .Where(p => p.IsWorking)
@@ -139,51 +191,50 @@ namespace ProxyCheckerConsoleApp
                     .ThenBy(p => p.ResponseTime)
                     .ToList();
 
-                Console.WriteLine($"Found {workingProxies.Count} working proxies");
+                Console.WriteLine($"\nFound {workingProxies.Count} working proxies");
 
                 if (workingProxies.Any())
                 {
                     await SaveResultsToGitHub(workingProxies);
                 }
 
+                var duration = DateTime.Now - startTime;
+                Console.WriteLine($"\nCheck cycle completed in {duration.TotalMinutes:F1} minutes");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error in check cycle: {ex.Message}");
+            }
+            finally
+            {
                 proxyList.Clear();
                 uniqueProxies.Clear();
-
-                Console.WriteLine("Waiting 1 hour before next check...");
-                await Task.Delay(TimeSpan.FromHours(1));
             }
         }
 
+        // Fetch proxies from all sources in parallel
         private static async Task FetchProxiesParallel()
         {
+            Console.WriteLine("Fetching proxies from all sources...");
             var tasks = proxySources.Select(source => FetchFromSource(source));
             await Task.WhenAll(tasks);
         }
 
+        // Fetch from individual source
         private static async Task FetchFromSource(string url)
         {
             try
             {
                 var response = await httpClient.GetStringAsync(url);
+                Console.WriteLine($"Successfully fetched from {url}");
 
-                if (url.Contains("geonode"))
+                if (url.EndsWith(".txt", StringComparison.OrdinalIgnoreCase))
                 {
-                    ParseJsonProxies(response);
-                }
-                else if (url.Contains("fate0"))
-                {
-                    foreach (var line in response.Split('\n', StringSplitOptions.RemoveEmptyEntries))
-                    {
-                        ParseJsonProxies(line);
-                    }
-                }
-                else if (url.EndsWith(".txt"))
-                {
-                    ParsePlainTextProxies(response);
+                    ParsePlainTextProxies(response, url);
                 }
                 else
                 {
-                    ParseHtmlProxies(response);
+                    ParseHtmlProxies(response, url);
                 }
             }
             catch (Exception ex)
@@ -192,140 +243,117 @@ namespace ProxyCheckerConsoleApp
             }
         }
 
-        private static void ParsePlainTextProxies(string content)
-        {
-            var lines = content.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
-            foreach (var line in lines)
-            {
-                var parts = line.Split(':', StringSplitOptions.RemoveEmptyEntries);
-                if (parts.Length >= 2)
-                {
-                    var type = line.ToLower().Contains("socks5") ? "socks5" :
-                              line.ToLower().Contains("socks4") ? "socks4" : "http";
-
-                    var proxy = new ProxyInfo
-                    {
-                        Ip = parts[0],
-                        Port = parts[1].Split(' ')[0],
-                        Type = type,
-                        IsWorking = false,
-                        ResponseTime = 0
-                    };
-
-                    if (uniqueProxies.TryAdd($"{proxy.Ip}:{proxy.Port}", 1))
-                    {
-                        proxyList.Add(proxy);
-                    }
-                }
-            }
-        }
-
-        private static void ParseJsonProxies(string json)
-        {
-            try
-            {
-                using var document = JsonDocument.Parse(json);
-                var root = document.RootElement;
-
-                if (root.TryGetProperty("data", out var data))
-                {
-                    foreach (var item in data.EnumerateArray())
-                    {
-                        if (item.TryGetProperty("ip", out var ip) &&
-                            item.TryGetProperty("port", out var port))
-                        {
-                            var proxy = new ProxyInfo
-                            {
-                                Ip = ip.GetString() ?? "",
-                                Port = port.GetString() ?? port.GetInt32().ToString(),
-                                Type = "http",
-                                IsWorking = false,
-                                ResponseTime = 0
-                            };
-
-                            if (uniqueProxies.TryAdd($"{proxy.Ip}:{proxy.Port}", 1))
-                            {
-                                proxyList.Add(proxy);
-                            }
-                        }
-                    }
-                }
-            }
-            catch (JsonException ex)
-            {
-                Console.WriteLine($"Error parsing JSON: {ex.Message}");
-            }
-        }
-
-        private static void ParseHtmlProxies(string html)
-        {
-            try
-            {
-                var doc = new HtmlDocument();
-                doc.LoadHtml(html);
-
-                var rows = doc.DocumentNode.SelectNodes("//table[@class='table table-striped table-bordered']//tr");
-                if (rows == null) return;
-
-                foreach (var row in rows.Skip(1))
-                {
-                    var cells = row.SelectNodes("td");
-                    if (cells?.Count >= 2)
-                    {
-                        var proxy = new ProxyInfo
-                        {
-                            Ip = cells[0].InnerText.Trim(),
-                            Port = cells[1].InnerText.Trim(),
-                            Type = html.Contains("socks-proxy") ? "socks4" : "http",
-                            IsWorking = false,
-                            ResponseTime = 0
-                        };
-
-                        if (uniqueProxies.TryAdd($"{proxy.Ip}:{proxy.Port}", 1))
-                        {
-                            proxyList.Add(proxy);
-                        }
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Error parsing HTML: {ex.Message}");
-            }
-        }
-
+        // Check proxies in parallel
         private static async Task CheckProxiesParallel()
         {
-            var tasks = proxyList.Select(proxy => CheckProxy(proxy));
-            await Task.WhenAll(tasks);
+            Console.WriteLine("\nStarting proxy verification...");
+            var batchSize = 50;
+            var proxyArray = proxyList.ToArray();
+            var batches = (int)Math.Ceiling(proxyArray.Length / (double)batchSize);
+
+            for (var i = 0; i < batches; i++)
+            {
+                var currentBatch = proxyArray
+                    .Skip(i * batchSize)
+                    .Take(batchSize);
+
+                var tasks = currentBatch.Select(proxy => CheckProxy(proxy));
+                await Task.WhenAll(tasks);
+
+                var progress = ((i + 1.0) / batches) * 100;
+                var workingCount = proxyList.Count(p => p.IsWorking);
+                Console.WriteLine($"Progress: {progress:F1}% | Working proxies found: {workingCount}");
+            }
         }
 
+        // Check individual proxy
         private static async Task CheckProxy(ProxyInfo proxy)
         {
             await semaphore.WaitAsync();
             try
             {
-                using var handler = new HttpClientHandler
+                var proxyUrl = proxy.Type.ToLower() switch
                 {
-                    Proxy = new WebProxy($"{proxy.Type}://{proxy.Ip}:{proxy.Port}"),
-                    UseProxy = true
+                    "socks5" => $"socks5://{proxy.Ip}:{proxy.Port}",
+                    "socks4" => $"socks4://{proxy.Ip}:{proxy.Port}",
+                    _ => $"http://{proxy.Ip}:{proxy.Port}"
                 };
 
-                using var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(10) };
-                var sw = System.Diagnostics.Stopwatch.StartNew();
-
-                var response = await client.GetAsync("http://www.google.com");
-                sw.Stop();
-
-                if (response.IsSuccessStatusCode)
+                // Validate the proxy URL
+                if (!Uri.TryCreate(proxyUrl, UriKind.Absolute, out var uriResult))
                 {
-                    proxy.IsWorking = true;
-                    proxy.ResponseTime = (int)sw.ElapsedMilliseconds;
-                    Console.WriteLine($"Working proxy found: {proxy.Type}://{proxy.Ip}:{proxy.Port} ({proxy.ResponseTime}ms)");
+                    Console.WriteLine($"Invalid proxy URL: {proxyUrl}. Skipping this proxy.");
+                    return;
                 }
-            }
-            catch
-            {
+
+                using var handler = new HttpClientHandler
+                {
+                    Proxy = new WebProxy(uriResult),
+                    UseProxy = true,
+                    AllowAutoRedirect = false,
+                    ServerCertificateCustomValidationCallback = (_, _, _, _) => true
+                };
+
+                using var client = new HttpClient(handler)
+                {
+                    Timeout = TimeSpan.FromSeconds(5)
+                };
+
+                client.DefaultRequestHeaders.UserAgent.ParseAdd(GetRandomUserAgent());
+
+                var sw = Stopwatch.StartNew();
+                proxy.LastChecked = DateTime.UtcNow;
+
+                var testUrls = new[]
+                {
+                    "http://ip-api.com/json/",
+                    "http://httpbin.org/ip",
+                    "https://api.ipify.org?format=json"
+                };
+
+                foreach (var url in testUrls)
+                {
+                    try
+                    {
+                        var response = await FetchWithRetryAsync(client, url);
+                        sw.Stop();
+
+                        if (response.IsSuccessStatusCode)
+                        {
+                            var content = await response.Content.ReadAsStringAsync();
+
+                            proxy.IsWorking = true;
+                            proxy.ResponseTime = (int)sw.ElapsedMilliseconds;
+                            proxy.SuccessCount++;
+
+                            if (content.Contains(proxy.Ip))
+                            {
+                                proxy.Anonymity = "Transparent";
+                            }
+                            else
+                            {
+                                var headers = response.Headers;
+                                if (!headers.Contains("X-Forwarded-For") && !headers.Contains("Via"))
+                                {
+                                    proxy.Type = proxy.Type.ToLower() != "socks5" && proxy.Type.ToLower() != "socks4" ? "elite" : proxy.Type;
+                                    proxy.Anonymity = "Elite";
+                                }
+                                else
+                                {
+                                    proxy.Anonymity = "Anonymous";
+                                }
+                            }
+
+                            return;
+                        }
+                    }
+                    catch
+                    {
+                        proxy.FailureCount++;
+                        continue;
+                    }
+                }
+
                 proxy.IsWorking = false;
             }
             finally
@@ -334,87 +362,174 @@ namespace ProxyCheckerConsoleApp
             }
         }
 
-        private static async Task SaveResultsToGitHub(List<ProxyInfo> workingProxies)
+        // Helper methods
+        private static async Task<HttpResponseMessage> FetchWithRetryAsync(HttpClient client, string url, int maxRetries = 2)
         {
-            if (!workingProxies.Any() || githubToken == null || githubRepoOwner == null || githubRepoName == null)
-                return;
+            for (int i = 0; i < maxRetries; i++)
+            {
+                try
+                {
+                    return await client.GetAsync(url);
+                }
+                catch when (i < maxRetries - 1)
+                {
+                    await Task.Delay((i + 1) * 1000);
+                }
+            }
+            return await client.GetAsync(url);
+        }
 
+        private static string GetRandomUserAgent()
+        {
+            return userAgents[Random.Shared.Next(userAgents.Length)];
+        }
+
+        private static void ParseHtmlProxies(string html, string sourceUrl)
+        {
             try
             {
-                var client = new GitHubClient(new ProductHeaderValue("ProxyCheckerConsoleApp"))
+                var doc = new HtmlDocument();
+                doc.LoadHtml(html);
+
+                var tablePatterns = new[]
                 {
-                    Credentials = new Credentials(githubToken)
+                    "//table[@class='table table-striped table-bordered']//tr",
+                    "//table[contains(@class, 'proxy-list')]//tr",
+                    "//table[contains(@class, 'proxies')]//tr"
                 };
 
-                var proxyTypes = workingProxies
-                    .Select(p => p.Type.ToLower())
-                    .Distinct()
-                    .ToArray();
-
-                var proxyTypeCounts = new Dictionary<string, int>();
-
-                foreach (var proxyType in proxyTypes)
+                foreach (var pattern in tablePatterns)
                 {
-                    var proxiesOfType = workingProxies
-                        .Where(p => p.Type.Equals(proxyType, StringComparison.OrdinalIgnoreCase))
-                        .OrderBy(p => p.ResponseTime)
-                        .Select(p => $"{p.Ip}:{p.Port} # Response: {p.ResponseTime}ms")
-                        .ToList();
-
-                    if (!proxiesOfType.Any()) continue;
-
-                    proxyTypeCounts[proxyType] = proxiesOfType.Count;
-
-                    var fileName = $"{proxyType}_proxies.txt";
-                    var timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
-                    var content = $"# Updated at {timestamp}\n" +
-                                $"# Total proxies: {proxiesOfType.Count}\n" +
-                                $"# Format: IP:PORT # Response time\n\n" +
-                                string.Join(Environment.NewLine, proxiesOfType);
-
-                    try
+                    var rows = doc.DocumentNode.SelectNodes(pattern);
+                    if (rows != null)
                     {
-                        var existingFile = await client.Repository.Content
-                            .GetAllContents(githubRepoOwner, githubRepoName, fileName);
+                        foreach (var row in rows.Skip(1))
+                        {
+                            var cells = row.SelectNodes("td");
+                            if (cells?.Count >= 2)
+                            {
+                                var anonymityCell = cells.Count >= 5 ? cells[4].InnerText.Trim().ToLower() : "unknown";
+                                var type = DetermineProxyType(sourceUrl, anonymityCell);
+                                var country = cells.Count >= 3 ? cells[2].InnerText.Trim() : "Unknown";
 
-                        var updateRequest = new UpdateFileRequest(
-                            $"Update {fileName} - {timestamp}",
-                            content,
-                            existingFile[0].Sha,
-                            branch: "main");
-
-                        await client.Repository.Content.UpdateFile(
-                            githubRepoOwner,
-                            githubRepoName,
-                            fileName,
-                            updateRequest);
-
-                        Console.WriteLine($"Successfully updated {fileName}");
-                    }
-                    catch (NotFoundException)
-                    {
-                        var createRequest = new CreateFileRequest(
-                            $"Create {fileName} - {timestamp}",
-                            content,
-                            branch: "main");
-
-                        await client.Repository.Content.CreateFile(
-                            githubRepoOwner,
-                            githubRepoName,
-                            fileName,
-                            createRequest);
-
-                        Console.WriteLine($"Successfully created {fileName}");
+                                AddProxyToList(
+                                    cells[0].InnerText.Trim(),
+                                    cells[1].InnerText.Trim(),
+                                    type,
+                                    anonymityCell,
+                                    country
+                                );
+                            }
+                        }
+                        break;
                     }
                 }
-
-                // Update README.md with current statistics
-                await UpdateReadme(client, proxyTypeCounts);
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error saving to GitHub: {ex.Message}");
-                SaveLocalBackup(workingProxies);
+                Console.WriteLine($"Error parsing HTML from {sourceUrl}: {ex.Message}");
+            }
+        }
+
+        private static void ParsePlainTextProxies(string content, string sourceUrl)
+        {
+            var lines = content.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+            foreach (var line in lines)
+            {
+                var parts = line.Split(':', StringSplitOptions.RemoveEmptyEntries);
+                if (parts.Length >= 2)
+                {
+                    var type = DetermineProxyType(sourceUrl + line.ToLower(), "");
+                    AddProxyToList(parts[0], parts[1].Split(' ')[0], type, type == "elite" ? "Elite" : "Unknown", "Unknown");
+                }
+            }
+        }
+
+        private static void AddProxyToList(string ip, string port, string type, string anonymity, string country)
+        {
+            if (uniqueProxies.TryAdd($"{ip}:{port}", 1))
+            {
+                proxyList.Add(new ProxyInfo
+                {
+                    Ip = ip,
+                    Port = port,
+                    Type = type,
+                    IsWorking = false,
+                    ResponseTime = 0,
+                    Anonymity = anonymity,
+                    Country = country,
+                    LastChecked = DateTime.UtcNow
+                });
+            }
+        }
+
+        private static string DetermineProxyType(string content, string anonymity)
+        {
+            content = content.ToLower();
+            if (content.Contains("socks5") || content.Contains("sock5"))
+                return "socks5";
+            if (content.Contains("socks4") || content.Contains("sock4"))
+                return "socks4";
+            if (content.Contains("elite") || anonymity.Contains("elite") ||
+                content.Contains("high anonymous") || anonymity.Contains("high anonymous"))
+                return "elite";
+            return "http";
+        }
+
+        private static async Task SaveResultsToGitHub(List<ProxyInfo> workingProxies)
+        {
+            Console.WriteLine("\nSaving results to GitHub...");
+            var client = new GitHubClient(new ProductHeaderValue("ProxyCheckerConsoleApp"))
+            {
+                Credentials = new Credentials(githubToken)
+            };
+
+            var proxyTypes = new[] { "http", "socks4", "socks5", "elite" };
+            var proxyTypeCounts = proxyTypes.ToDictionary(t => t, t => 0);
+
+            foreach (var type in proxyTypes)
+            {
+                var proxiesOfType = workingProxies.Where(p => p.Type.ToLower() == type).ToList();
+                proxyTypeCounts[type] = proxiesOfType.Count;
+
+                if (proxiesOfType.Any())
+                {
+                    await UpdateProxyFile(client, type, proxiesOfType);
+                }
+            }
+
+            await UpdateReadme(client, proxyTypeCounts);
+        }
+
+        private static async Task UpdateProxyFile(GitHubClient client, string type, List<ProxyInfo> proxies)
+        {
+            var filePath = $"{type}_proxies.txt";
+            var proxyData = string.Join("\n", proxies.Select(p => $"{p.Ip}:{p.Port}"));
+
+            try
+            {
+                var existingFile = await client.Repository.Content.GetAllContents(githubRepoOwner, githubRepoName, filePath);
+
+                if (existingFile.Any())
+                {
+                    var updateRequest = new UpdateFileRequest(
+                        $"Updated {type} proxies",
+                        proxyData,
+                        existingFile.First().Sha
+                    );
+                    await client.Repository.Content.UpdateFile(githubRepoOwner, githubRepoName, filePath, updateRequest);
+                }
+                else
+                {
+                    var createRequest = new CreateFileRequest($"Created {type} proxies file", proxyData);
+                    await client.Repository.Content.CreateFile(githubRepoOwner, githubRepoName, filePath, createRequest);
+                }
+
+                Console.WriteLine($"Updated {filePath} successfully!");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error updating {filePath}: {ex.Message}");
             }
         }
 
@@ -425,98 +540,82 @@ namespace ProxyCheckerConsoleApp
                 var timestamp = DateTime.UtcNow.ToString("dddd dd-MM-yyyy HH:mm:ss");
                 var totalProxies = proxyTypeCounts.Values.Sum();
 
-                var readmeContent = $@"# Free Proxy List
+                var readmeContent = GenerateReadmeContent(timestamp, totalProxies, proxyTypeCounts);
 
-This list gets free public proxies that are updated from time to time.
-I collected them from the Internet for easy access. Remember, I'm not in charge of these proxies.
+                var existingReadme = await client.Repository.Content.GetAllContents(githubRepoOwner, githubRepoName, "README.md");
+                var updateRequest = new UpdateFileRequest(
+                    "Updated README with latest proxy statistics",
+                    readmeContent,
+                    existingReadme.First().Sha
+                );
 
-Last Updated: {timestamp} UTC
-Total Proxies: {totalProxies}
+                await client.Repository.Content.UpdateFile(
+                    githubRepoOwner,
+                    githubRepoName,
+                    "README.md",
+                    updateRequest
+                );
 
-## DOWNLOAD
-
-{string.Join("\n", proxyTypeCounts.Select(kvp => $@"### {kvp.Key.ToUpper()}
-https://raw.githubusercontent.com/{githubRepoOwner}/{githubRepoName}/main/{kvp.Key.ToLower()}_proxies.txt
-Total: {kvp.Value} proxies"))}
-
-## NOTES
-- It is Only For Educational Purposes. Neither I Say Nor I Promote To Do Anything Illegal.
-- Developer Please Give Credits, Stars, And Follow If You Use This Proxy List.
-
-## Proxy Sources
-- Various public proxy sources
-- Regular updates every hour
-- Automatically checked for validity
-- Response time verified
-
-## Statistics
-{string.Join("\n", proxyTypeCounts.Select(kvp => $"- {kvp.Key.ToUpper()}: {kvp.Value} working proxies"))}
-
-## Disclaimer
-These proxies are gathered from public sources. Use them at your own risk.
-";
-
-                try
-                {
-                    var existingFile = await client.Repository.Content
-                        .GetAllContents(githubRepoOwner, githubRepoName, "README.md");
-
-                    var updateRequest = new UpdateFileRequest(
-                        $"Update README.md - {timestamp} UTC",
-                        readmeContent,
-                        existingFile[0].Sha,
-                        branch: "main");
-
-                    await client.Repository.Content.UpdateFile(
-                        githubRepoOwner,
-                        githubRepoName,
-                        "README.md",
-                        updateRequest);
-
-                    Console.WriteLine("Successfully updated README.md");
-                }
-                catch (NotFoundException)
-                {
-                    var createRequest = new CreateFileRequest(
-                        $"Create README.md - {timestamp} UTC",
-                        readmeContent,
-                        branch: "main");
-
-                    await client.Repository.Content.CreateFile(
-                        githubRepoOwner,
-                        githubRepoName,
-                        "README.md",
-                        createRequest);
-
-                    Console.WriteLine("Successfully created README.md");
-                }
+                Console.WriteLine("README.md updated successfully!");
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error updating README: {ex.Message}");
+                Console.WriteLine($"Failed to update README.md: {ex.Message}");
             }
         }
 
-        private static void SaveLocalBackup(List<ProxyInfo> workingProxies)
+        private static string GenerateReadmeContent(string timestamp, int totalProxies, Dictionary<string, int> proxyTypeCounts)
         {
-            try
-            {
-                var backupDir = "proxy_backup";
-                Directory.CreateDirectory(backupDir);
-                var backupFile = Path.Combine(backupDir, $"proxies_{DateTime.Now:yyyyMMdd_HHmmss}.txt");
+            return $@"# 🌐 Free Proxy List
 
-                var content = workingProxies
-                    .OrderBy(p => p.Type)
-                    .ThenBy(p => p.ResponseTime)
-                    .Select(p => $"{p.Ip}:{p.Port}:{p.Type} # Response: {p.ResponseTime}ms");
+## 📊 Real-Time Statistics
+- 🕒 Last Updated: {timestamp} UTC
+- 📈 Total Working Proxies: {totalProxies}
 
-                File.WriteAllLines(backupFile, content);
-                Console.WriteLine($"Backup saved to {backupFile}");
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Error saving backup: {ex.Message}");
-            }
+## 📥 Proxy Downloads
+
+### HTTP Proxies
+- Count: {proxyTypeCounts["http"]}
+- [Download HTTP Proxies](https://raw.githubusercontent.com/{githubRepoOwner}/{githubRepoName}/master/http_proxies.txt)
+
+### SOCKS4 Proxies
+- Count: {proxyTypeCounts["socks4"]}
+- [Download SOCKS4 Proxies](https://raw.githubusercontent.com/{githubRepoOwner}/{githubRepoName}/master/socks4_proxies.txt)
+
+### SOCKS5 Proxies
+- Count: {proxyTypeCounts["socks5"]}
+- [Download SOCKS5 Proxies](https://raw.githubusercontent.com/{githubRepoOwner}/{githubRepoName}/master/socks5_proxies.txt)
+
+### Elite Proxies
+- Count: {proxyTypeCounts["elite"]}
+- [Download Elite Proxies](https://raw.githubusercontent.com/{githubRepoOwner}/{githubRepoName}/master/elite_proxies.txt)
+
+## 📈 Proxy Types Overview
+
+| Type | Working Proxies |
+|------|----------------|
+| HTTP | {proxyTypeCounts["http"]} |
+| SOCKS4 | {proxyTypeCounts["socks4"]} |
+| SOCKS5 | {proxyTypeCounts["socks5"]} |
+| ELITE | {proxyTypeCounts["elite"]} |
+
+## ✨ Features
+- 🔄 Auto-updates every day
+- ✅ All proxies are tested
+- ⚡ Speed tested
+- 🌍 Support for multiple proxy types
+- 🛡️ Elite proxy detection
+
+## 📝 Notes
+- Proxies are gathered from public sources
+- Speed and status may vary
+- Implement your own validation for critical uses
+
+## ⚠️ Disclaimer
+These proxies are for educational purposes only. Users must comply with local laws and regulations.
+
+---
+*Updated: {timestamp} UTC*";
         }
     }
 }
