@@ -10,7 +10,6 @@ using System.Net.Http;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
-using System.Text;
 using HtmlAgilityPack;
 using Octokit;
 using DotNetEnv;
@@ -23,7 +22,7 @@ namespace ProxyCheckerConsoleApp
         // Thread-safe collections
         private static readonly ConcurrentBag<ProxyInfo> proxyList = new();
         private static readonly ConcurrentDictionary<string, byte> uniqueProxies = new();
-        private static readonly SemaphoreSlim semaphore = new(500);
+        private static readonly SemaphoreSlim semaphore = new(250);
 
         // GitHub configuration
         private static string? githubToken;
@@ -49,7 +48,7 @@ namespace ProxyCheckerConsoleApp
 
         private static readonly HttpClient httpClient = new(handler)
         {
-            Timeout = TimeSpan.FromSeconds(30)
+            Timeout = TimeSpan.FromSeconds(3)
         };
 
         // Global network settings
@@ -58,7 +57,7 @@ namespace ProxyCheckerConsoleApp
             ServicePointManager.DefaultConnectionLimit = 1000;
             ServicePointManager.ReusePort = true;
             ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12 | SecurityProtocolType.Tls13;
-            ServicePointManager.CheckCertificateRevocationList = false;
+            ServicePointManager.CheckCertificateRevocationList = true; // Enabled for security
         }
 
         // Proxy model
@@ -117,8 +116,24 @@ namespace ProxyCheckerConsoleApp
             "https://raw.githubusercontent.com/proxy4parsing/proxy-list/main/http.txt",
             "https://raw.githubusercontent.com/roosterkid/openproxylist/main/SOCKS4_RAW.txt",
             "https://raw.githubusercontent.com/roosterkid/openproxylist/main/SOCKS5_RAW.txt",
+            "https://raw.githubusercontent.com/ZoniBoy00/proxy-lists/master/http_proxies.txt",
+            "https://raw.githubusercontent.com/ZoniBoy00/proxy-lists/master/socks4_proxies.txt",
+            "https://raw.githubusercontent.com/ZoniBoy00/proxy-lists/master/socks5_proxies.txt",
+            "https://raw.githubusercontent.com/ZoniBoy00/proxy-lists/master/elite_proxies.txt",
             "https://www.proxynova.com/proxy-server-list/elite-proxies",
-            "https://www.proxynova.com/proxy-server-list/anonymous-proxies"
+            "https://www.proxynova.com/proxy-server-list/anonymous-proxies",
+            "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&proxy_format=ipport&format=text&anonymity=Elite&timeout=20000",
+            "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&proxy_format=protocolipport&format=text",
+            "https://hidemy.name/en/proxy-list/",
+            "https://spys.one/en/free-proxy-list/",
+            "https://proxy-daily.com/",
+            "https://proxyscan.io/download?type=http",
+            "https://proxydb.net/?protocol=https",
+            "https://sockslist.us/api?request=display&country=all&level=all&token=free",
+            "https://www.proxy-list.download/api/v1/get?type=https",
+            "https://proxyservers.pro/proxy/list/",
+            "https://checkerproxy.net/api/archive/",
+            "https://www.my-proxy.com/free-proxy-list.html"
         };
 
         // Main entry point
@@ -136,15 +151,15 @@ namespace ProxyCheckerConsoleApp
                     throw new Exception("GitHub configuration is missing in .env file");
                 }
 
+                Console.WriteLine("Starting Proxy Checker...");
                 await TestGitHubConnection();
 
-                // Start continuous scanning process
                 while (true)
                 {
                     await RunProxyCheck();
 
                     // Wait for one hour before the next scan
-                    Console.WriteLine("\nWaiting for one hour before the next scan...");
+                    Console.WriteLine("Waiting for one hour before the next scan...");
                     await Task.Delay(TimeSpan.FromHours(1));
                 }
             }
@@ -175,7 +190,7 @@ namespace ProxyCheckerConsoleApp
         // Main proxy checking process
         private static async Task RunProxyCheck()
         {
-            Console.WriteLine("\nStarting new proxy check cycle...");
+            Console.WriteLine("Starting new proxy check cycle...");
             var startTime = DateTime.Now;
 
             try
@@ -191,7 +206,7 @@ namespace ProxyCheckerConsoleApp
                     .ThenBy(p => p.ResponseTime)
                     .ToList();
 
-                Console.WriteLine($"\nFound {workingProxies.Count} working proxies");
+                Console.WriteLine($"Found {workingProxies.Count} working proxies");
 
                 if (workingProxies.Any())
                 {
@@ -199,7 +214,7 @@ namespace ProxyCheckerConsoleApp
                 }
 
                 var duration = DateTime.Now - startTime;
-                Console.WriteLine($"\nCheck cycle completed in {duration.TotalMinutes:F1} minutes");
+                Console.WriteLine($"Check cycle completed in {duration.TotalMinutes:F1} minutes");
             }
             catch (Exception ex)
             {
@@ -237,6 +252,10 @@ namespace ProxyCheckerConsoleApp
                     ParseHtmlProxies(response, url);
                 }
             }
+            catch (HttpRequestException httpEx)
+            {
+                Console.WriteLine($"Network error fetching from {url}: {httpEx.Message}");
+            }
             catch (Exception ex)
             {
                 Console.WriteLine($"Error fetching from {url}: {ex.Message}");
@@ -246,8 +265,8 @@ namespace ProxyCheckerConsoleApp
         // Check proxies in parallel
         private static async Task CheckProxiesParallel()
         {
-            Console.WriteLine("\nStarting proxy verification...");
-            var batchSize = 50;
+            Console.WriteLine("Starting proxy verification...");
+            var batchSize = 100;
             var proxyArray = proxyList.ToArray();
             var batches = (int)Math.Ceiling(proxyArray.Length / (double)batchSize);
 
@@ -279,7 +298,6 @@ namespace ProxyCheckerConsoleApp
                     _ => $"http://{proxy.Ip}:{proxy.Port}"
                 };
 
-                // Validate the proxy URL
                 if (!Uri.TryCreate(proxyUrl, UriKind.Absolute, out var uriResult))
                 {
                     Console.WriteLine($"Invalid proxy URL: {proxyUrl}. Skipping this proxy.");
@@ -290,8 +308,7 @@ namespace ProxyCheckerConsoleApp
                 {
                     Proxy = new WebProxy(uriResult),
                     UseProxy = true,
-                    AllowAutoRedirect = false,
-                    ServerCertificateCustomValidationCallback = (_, _, _, _) => true
+                    AllowAutoRedirect = false
                 };
 
                 using var client = new HttpClient(handler)
@@ -304,12 +321,7 @@ namespace ProxyCheckerConsoleApp
                 var sw = Stopwatch.StartNew();
                 proxy.LastChecked = DateTime.UtcNow;
 
-                var testUrls = new[]
-                {
-                    "http://ip-api.com/json/",
-                    "http://httpbin.org/ip",
-                    "https://api.ipify.org?format=json"
-                };
+                var testUrls = new[] { "http://ip-api.com/json/", "http://httpbin.org/ip", "https://api.ipify.org?format=json" };
 
                 foreach (var url in testUrls)
                 {
@@ -321,29 +333,11 @@ namespace ProxyCheckerConsoleApp
                         if (response.IsSuccessStatusCode)
                         {
                             var content = await response.Content.ReadAsStringAsync();
-
                             proxy.IsWorking = true;
                             proxy.ResponseTime = (int)sw.ElapsedMilliseconds;
                             proxy.SuccessCount++;
 
-                            if (content.Contains(proxy.Ip))
-                            {
-                                proxy.Anonymity = "Transparent";
-                            }
-                            else
-                            {
-                                var headers = response.Headers;
-                                if (!headers.Contains("X-Forwarded-For") && !headers.Contains("Via"))
-                                {
-                                    proxy.Type = proxy.Type.ToLower() != "socks5" && proxy.Type.ToLower() != "socks4" ? "elite" : proxy.Type;
-                                    proxy.Anonymity = "Elite";
-                                }
-                                else
-                                {
-                                    proxy.Anonymity = "Anonymous";
-                                }
-                            }
-
+                            proxy.Anonymity = DetermineAnonymity(content, response);
                             return;
                         }
                     }
@@ -362,6 +356,17 @@ namespace ProxyCheckerConsoleApp
             }
         }
 
+        private static string DetermineAnonymity(string content, HttpResponseMessage response)
+        {
+            if (content.Contains("transparent"))
+                return "Transparent";
+
+            if (!response.Headers.Contains("X-Forwarded-For") && !response.Headers.Contains("Via"))
+                return "Elite";
+
+            return "Anonymous";
+        }
+
         // Helper methods
         private static async Task<HttpResponseMessage> FetchWithRetryAsync(HttpClient client, string url, int maxRetries = 2)
         {
@@ -371,12 +376,13 @@ namespace ProxyCheckerConsoleApp
                 {
                     return await client.GetAsync(url);
                 }
-                catch when (i < maxRetries - 1)
+                catch (Exception)
                 {
+                    if (i == maxRetries - 1) throw;
                     await Task.Delay((i + 1) * 1000);
                 }
             }
-            return await client.GetAsync(url);
+            throw new HttpRequestException($"Failed to fetch {url} after {maxRetries} retries.");
         }
 
         private static string GetRandomUserAgent()
@@ -395,7 +401,9 @@ namespace ProxyCheckerConsoleApp
                 {
                     "//table[@class='table table-striped table-bordered']//tr",
                     "//table[contains(@class, 'proxy-list')]//tr",
-                    "//table[contains(@class, 'proxies')]//tr"
+                    "//table[contains(@class, 'proxies')]//tr",
+                    "//table[@id='proxylisttable']//tr",
+                    "//table//tr[contains(@class, 'odd')]"
                 };
 
                 foreach (var pattern in tablePatterns)
@@ -478,7 +486,7 @@ namespace ProxyCheckerConsoleApp
 
         private static async Task SaveResultsToGitHub(List<ProxyInfo> workingProxies)
         {
-            Console.WriteLine("\nSaving results to GitHub...");
+            Console.WriteLine("Saving results to GitHub...");
             var client = new GitHubClient(new ProductHeaderValue("ProxyCheckerConsoleApp"))
             {
                 Credentials = new Credentials(githubToken)
